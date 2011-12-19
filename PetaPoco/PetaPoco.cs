@@ -1911,6 +1911,62 @@ namespace PetaPoco
 					}
 					else
 #endif
+                                            if (type == typeof(Dictionary<string, object>))
+					    {
+						// var poco=new T()
+						il.Emit(OpCodes.Newobj, typeof(Dictionary<string, object>).GetConstructor(Type.EmptyTypes));			// obj
+
+						MethodInfo fnAdd = typeof(IDictionary<string, object>).GetMethod("Add");
+
+						// Enumerate all fields generating a set assignment for the column
+						for (int i = firstColumn; i < firstColumn + countColumns; i++)
+						{
+							var srcType = r.GetFieldType(i);
+
+							il.Emit(OpCodes.Dup);						// obj, obj
+							il.Emit(OpCodes.Ldstr, r.GetName(i));		// obj, obj, fieldname
+
+							// Get the converter
+							Func<object, object> converter = null;
+							if (Database.Mapper != null)
+								converter = Database.Mapper.GetFromDbConverter(null, srcType);
+							if (ForceDateTimesToUtc && converter == null && srcType == typeof(DateTime))
+								converter = delegate(object src) { return new DateTime(((DateTime)src).Ticks, DateTimeKind.Utc); };
+
+							// Setup stack for call to converter
+							AddConverterToStack(il, converter);
+
+							// r[i]
+							il.Emit(OpCodes.Ldarg_0);					// obj, obj, fieldname, converter?,    rdr
+							il.Emit(OpCodes.Ldc_I4, i);					// obj, obj, fieldname, converter?,  rdr,i
+							il.Emit(OpCodes.Callvirt, fnGetValue);		// obj, obj, fieldname, converter?,  value
+
+							// Convert DBNull to null
+							il.Emit(OpCodes.Dup);						// obj, obj, fieldname, converter?,  value, value
+							il.Emit(OpCodes.Isinst, typeof(DBNull));	// obj, obj, fieldname, converter?,  value, (value or null)
+							var lblNotNull = il.DefineLabel();
+							il.Emit(OpCodes.Brfalse_S, lblNotNull);		// obj, obj, fieldname, converter?,  value
+							il.Emit(OpCodes.Pop);						// obj, obj, fieldname, converter?
+							if (converter != null)
+								il.Emit(OpCodes.Pop);					// obj, obj, fieldname, 
+							il.Emit(OpCodes.Ldnull);					// obj, obj, fieldname, null
+							if (converter != null)
+							{
+								var lblReady = il.DefineLabel();
+								il.Emit(OpCodes.Br_S, lblReady);
+								il.MarkLabel(lblNotNull);
+								il.Emit(OpCodes.Callvirt, fnInvoke);
+								il.MarkLabel(lblReady);
+							}
+							else
+							{
+								il.MarkLabel(lblNotNull);
+							}
+
+							il.Emit(OpCodes.Callvirt, fnAdd);
+						}
+					    }
+					    else
 						if (type.IsValueType || type == typeof(string) || type == typeof(byte[]))
 						{
 							// Do we need to install a converter?
