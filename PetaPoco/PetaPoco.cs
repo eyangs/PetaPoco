@@ -1,4 +1,4 @@
-﻿/* PetaPoco v4.0.3 - A Tiny ORMish thing for your POCO's.
+/* PetaPoco v4.0.3 - A Tiny ORMish thing for your POCO's.
  * Copyright © 2011 Topten Software.  All Rights Reserved.
  * 
  * Apache License 2.0 - http://www.toptensoftware.com/petapoco/license
@@ -609,12 +609,11 @@ namespace PetaPoco
 		static Regex rxColumns = new Regex(@"\A\s*SELECT\s+((?:\((?>\((?<depth>)|\)(?<-depth>)|.?)*(?(depth)(?!))\)|.)*?)(?<!,\s+)\bFROM\b", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.Compiled);
 		static Regex rxOrderBy = new Regex(@"\bORDER\s+BY\s+(?:\((?>\((?<depth>)|\)(?<-depth>)|.?)*(?(depth)(?!))\)|[\w\(\)\.])+(?:\s+(?:ASC|DESC))?(?:\s*,\s*(?:\((?>\((?<depth>)|\)(?<-depth>)|.?)*(?(depth)(?!))\)|[\w\(\)\.])+(?:\s+(?:ASC|DESC))?)*", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.Compiled);
 		static Regex rxDistinct = new Regex(@"\ADISTINCT\s", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.Compiled);
-		public static bool SplitSqlForPaging(string sql, out string sqlCount, out string sqlSelectRemoved, out string sqlOrderBy, out string sqlColumns)
+		public static bool SplitSqlForPaging(string sql, out string sqlCount, out string sqlSelectRemoved, out string sqlOrderBy)
 		{
 			sqlSelectRemoved = null;
 			sqlCount = null;
 			sqlOrderBy = null;
-			sqlColumns = null;
 
 			// Extract the columns from "SELECT <whatever> FROM"
 			var m = rxColumns.Match(sql);
@@ -624,7 +623,6 @@ namespace PetaPoco
 			// Save column list and replace with COUNT(*)
 			Group g = m.Groups[1];
 			sqlSelectRemoved = sql.Substring(g.Index);
-			sqlColumns = g.Value;
 
 			if (rxDistinct.IsMatch(sqlSelectRemoved))
 				sqlCount = sql.Substring(0, g.Index) + "COUNT(" + m.Groups[1].ToString().Trim() + ") " + sql.Substring(g.Index + g.Length);
@@ -655,11 +653,11 @@ namespace PetaPoco
 				sql = AddSelectClause<T>(sql);
 
 			// Split the SQL into the bits we need
-			string sqlSelectRemoved, sqlOrderBy, sqlColumns;
-            		if (!SplitSqlForPaging(sql, out sqlCount, out sqlSelectRemoved, out sqlOrderBy, out sqlColumns))
+			string sqlSelectRemoved, sqlOrderBy;
+			if (!SplitSqlForPaging(sql, out sqlCount, out sqlSelectRemoved, out sqlOrderBy))
 				throw new Exception("Unable to parse SQL statement for paged query");
 			if (_dbType == DBType.Oracle && sqlSelectRemoved.StartsWith("*"))
-                		throw new Exception("Query must alias '*' when performing a paged query.\neg. select t.* from table t order by t.id");
+                throw new Exception("Query must alias '*' when performing a paged query.\neg. select t.* from table t order by t.id");
 
 			// Build the SQL for the actual final result
 			if (_dbType == DBType.SqlServer || _dbType == DBType.Oracle)
@@ -669,8 +667,8 @@ namespace PetaPoco
 				{
 					sqlSelectRemoved = "peta_inner.* FROM (SELECT " + sqlSelectRemoved + ") peta_inner";
 				}
-				sqlPage = string.Format("SELECT {4} FROM (SELECT ROW_NUMBER() OVER ({0}) peta_rn, {1}) peta_paged WHERE peta_rn>@{2} AND peta_rn<=@{3}",
-										sqlOrderBy==null ? "ORDER BY (SELECT NULL)" : sqlOrderBy, sqlSelectRemoved, args.Length, args.Length + 1, sqlColumns);
+				sqlPage = string.Format("SELECT * FROM (SELECT ROW_NUMBER() OVER ({0}) peta_rn, {1}) peta_paged WHERE peta_rn>@{2} AND peta_rn<=@{3}",
+										sqlOrderBy==null ? "ORDER BY (SELECT NULL)" : sqlOrderBy, sqlSelectRemoved, args.Length, args.Length + 1);
 				args = args.Concat(new object[] { skip, skip+take }).ToArray();
 			}
 			else if (_dbType == DBType.SqlServerCE)
