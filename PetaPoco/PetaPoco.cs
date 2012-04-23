@@ -8,7 +8,8 @@
  * and Adam Schroder (@schotime) for lots of suggestions, improvements and Oracle support
  */
 
-// Define PETAPOCO_NO_DYNAMIC in your project settings on .NET 3.5
+//Define PETAPOCO_NO_DYNAMIC in your project settings on .NET 3.5
+//#define PETAPOCO_NO_DYNAMIC
 
 using System;
 using System.Collections.Generic;
@@ -1861,14 +1862,21 @@ namespace PetaPoco
 					// Create the method
 					var m = new DynamicMethod("petapoco_factory_" + PocoFactories.Count.ToString(), type, new Type[] { typeof(IDataReader) }, true);
 					var il = m.GetILGenerator();
+                    MethodInfo fnAdd = null;
 
 #if !PETAPOCO_NO_DYNAMIC
-					if (type == typeof(object))
+                    if (type == typeof(object))
 					{
+
 						// var poco=new T()
 						il.Emit(OpCodes.Newobj, typeof(System.Dynamic.ExpandoObject).GetConstructor(Type.EmptyTypes));			// obj
-
-						MethodInfo fnAdd = typeof(IDictionary<string, object>).GetMethod("Add");
+#else
+                    if (type == typeof(object))
+					{
+                        //for .net3.5
+						il.Emit(OpCodes.Newobj, typeof(Dictionary<string, object>).GetConstructor(Type.EmptyTypes));			// obj
+#endif
+                        fnAdd = typeof(IDictionary<string, object>).GetMethod("Add");
 
 						// Enumerate all fields generating a set assignment for the column
 						for (int i = firstColumn; i < firstColumn + countColumns; i++)
@@ -1918,179 +1926,121 @@ namespace PetaPoco
 							il.Emit(OpCodes.Callvirt, fnAdd);
 						}
 					}
-					else
-#endif
-                                            if (type == typeof(Dictionary<string, object>))
-					    {
-						// var poco=new T()
-						il.Emit(OpCodes.Newobj, typeof(Dictionary<string, object>).GetConstructor(Type.EmptyTypes));			// obj
+					else if (type.IsValueType || type == typeof(string) || type == typeof(byte[]))
+					{
+						// Do we need to install a converter?
+						var srcType = r.GetFieldType(0);
+						var converter = GetConverter(ForceDateTimesToUtc, null, srcType, type);
 
-						MethodInfo fnAdd = typeof(IDictionary<string, object>).GetMethod("Add");
+						// "if (!rdr.IsDBNull(i))"
+						il.Emit(OpCodes.Ldarg_0);										// rdr
+						il.Emit(OpCodes.Ldc_I4_0);										// rdr,0
+						il.Emit(OpCodes.Callvirt, fnIsDBNull);							// bool
+						var lblCont = il.DefineLabel();
+						il.Emit(OpCodes.Brfalse_S, lblCont);
+						il.Emit(OpCodes.Ldnull);										// null
+						var lblFin = il.DefineLabel();
+						il.Emit(OpCodes.Br_S, lblFin);
+
+						il.MarkLabel(lblCont);
+
+						// Setup stack for call to converter
+						AddConverterToStack(il, converter);
+
+						il.Emit(OpCodes.Ldarg_0);										// rdr
+						il.Emit(OpCodes.Ldc_I4_0);										// rdr,0
+						il.Emit(OpCodes.Callvirt, fnGetValue);							// value
+
+						// Call the converter
+						if (converter != null)
+							il.Emit(OpCodes.Callvirt, fnInvoke);
+
+						il.MarkLabel(lblFin);
+						il.Emit(OpCodes.Unbox_Any, type);								// value converted
+					}
+					else
+					{
+						// var poco=new T()
+						il.Emit(OpCodes.Newobj, type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[0], null));
 
 						// Enumerate all fields generating a set assignment for the column
 						for (int i = firstColumn; i < firstColumn + countColumns; i++)
 						{
+							// Get the PocoColumn for this db column, ignore if not known
+							PocoColumn pc;
+							if (!Columns.TryGetValue(r.GetName(i), out pc))
+								continue;
+
+							// Get the source type for this column
 							var srcType = r.GetFieldType(i);
-
-							il.Emit(OpCodes.Dup);						// obj, obj
-							il.Emit(OpCodes.Ldstr, r.GetName(i));		// obj, obj, fieldname
-
-							// Get the converter
-							Func<object, object> converter = null;
-							if (Database.Mapper != null)
-								converter = Database.Mapper.GetFromDbConverter(null, srcType);
-							if (ForceDateTimesToUtc && converter == null && srcType == typeof(DateTime))
-								converter = delegate(object src) { return new DateTime(((DateTime)src).Ticks, DateTimeKind.Utc); };
-
-							// Setup stack for call to converter
-							AddConverterToStack(il, converter);
-
-							// r[i]
-							il.Emit(OpCodes.Ldarg_0);					// obj, obj, fieldname, converter?,    rdr
-							il.Emit(OpCodes.Ldc_I4, i);					// obj, obj, fieldname, converter?,  rdr,i
-							il.Emit(OpCodes.Callvirt, fnGetValue);		// obj, obj, fieldname, converter?,  value
-
-							// Convert DBNull to null
-							il.Emit(OpCodes.Dup);						// obj, obj, fieldname, converter?,  value, value
-							il.Emit(OpCodes.Isinst, typeof(DBNull));	// obj, obj, fieldname, converter?,  value, (value or null)
-							var lblNotNull = il.DefineLabel();
-							il.Emit(OpCodes.Brfalse_S, lblNotNull);		// obj, obj, fieldname, converter?,  value
-							il.Emit(OpCodes.Pop);						// obj, obj, fieldname, converter?
-							if (converter != null)
-								il.Emit(OpCodes.Pop);					// obj, obj, fieldname, 
-							il.Emit(OpCodes.Ldnull);					// obj, obj, fieldname, null
-							if (converter != null)
-							{
-								var lblReady = il.DefineLabel();
-								il.Emit(OpCodes.Br_S, lblReady);
-								il.MarkLabel(lblNotNull);
-								il.Emit(OpCodes.Callvirt, fnInvoke);
-								il.MarkLabel(lblReady);
-							}
-							else
-							{
-								il.MarkLabel(lblNotNull);
-							}
-
-							il.Emit(OpCodes.Callvirt, fnAdd);
-						}
-					    }
-					    else
-						if (type.IsValueType || type == typeof(string) || type == typeof(byte[]))
-						{
-							// Do we need to install a converter?
-							var srcType = r.GetFieldType(0);
-							var converter = GetConverter(ForceDateTimesToUtc, null, srcType, type);
+							var dstType = pc.PropertyInfo.PropertyType;
 
 							// "if (!rdr.IsDBNull(i))"
-							il.Emit(OpCodes.Ldarg_0);										// rdr
-							il.Emit(OpCodes.Ldc_I4_0);										// rdr,0
-							il.Emit(OpCodes.Callvirt, fnIsDBNull);							// bool
-							var lblCont = il.DefineLabel();
-							il.Emit(OpCodes.Brfalse_S, lblCont);
-							il.Emit(OpCodes.Ldnull);										// null
-							var lblFin = il.DefineLabel();
-							il.Emit(OpCodes.Br_S, lblFin);
+							il.Emit(OpCodes.Ldarg_0);										// poco,rdr
+							il.Emit(OpCodes.Ldc_I4, i);										// poco,rdr,i
+							il.Emit(OpCodes.Callvirt, fnIsDBNull);							// poco,bool
+							var lblNext = il.DefineLabel();
+							il.Emit(OpCodes.Brtrue_S, lblNext);								// poco
 
-							il.MarkLabel(lblCont);
+							il.Emit(OpCodes.Dup);											// poco,poco
 
-							// Setup stack for call to converter
-							AddConverterToStack(il, converter);
+							// Do we need to install a converter?
+							var converter = GetConverter(ForceDateTimesToUtc, pc, srcType, dstType);
 
-							il.Emit(OpCodes.Ldarg_0);										// rdr
-							il.Emit(OpCodes.Ldc_I4_0);										// rdr,0
-							il.Emit(OpCodes.Callvirt, fnGetValue);							// value
-
-							// Call the converter
-							if (converter != null)
-								il.Emit(OpCodes.Callvirt, fnInvoke);
-
-							il.MarkLabel(lblFin);
-							il.Emit(OpCodes.Unbox_Any, type);								// value converted
-						}
-						else
-						{
-							// var poco=new T()
-							il.Emit(OpCodes.Newobj, type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[0], null));
-
-							// Enumerate all fields generating a set assignment for the column
-							for (int i = firstColumn; i < firstColumn + countColumns; i++)
+							// Fast
+							bool Handled = false;
+							if (converter == null)
 							{
-								// Get the PocoColumn for this db column, ignore if not known
-								PocoColumn pc;
-								if (!Columns.TryGetValue(r.GetName(i), out pc))
-									continue;
-
-								// Get the source type for this column
-								var srcType = r.GetFieldType(i);
-								var dstType = pc.PropertyInfo.PropertyType;
-
-								// "if (!rdr.IsDBNull(i))"
-								il.Emit(OpCodes.Ldarg_0);										// poco,rdr
-								il.Emit(OpCodes.Ldc_I4, i);										// poco,rdr,i
-								il.Emit(OpCodes.Callvirt, fnIsDBNull);							// poco,bool
-								var lblNext = il.DefineLabel();
-								il.Emit(OpCodes.Brtrue_S, lblNext);								// poco
-
-								il.Emit(OpCodes.Dup);											// poco,poco
-
-								// Do we need to install a converter?
-								var converter = GetConverter(ForceDateTimesToUtc, pc, srcType, dstType);
-
-								// Fast
-								bool Handled = false;
-								if (converter == null)
+								var valuegetter = typeof(IDataRecord).GetMethod("Get" + srcType.Name, new Type[] { typeof(int) });
+								if (valuegetter != null
+										&& valuegetter.ReturnType == srcType
+										&& (valuegetter.ReturnType == dstType || valuegetter.ReturnType == Nullable.GetUnderlyingType(dstType)))
 								{
-									var valuegetter = typeof(IDataRecord).GetMethod("Get" + srcType.Name, new Type[] { typeof(int) });
-									if (valuegetter != null
-											&& valuegetter.ReturnType == srcType
-											&& (valuegetter.ReturnType == dstType || valuegetter.ReturnType == Nullable.GetUnderlyingType(dstType)))
-									{
-										il.Emit(OpCodes.Ldarg_0);										// *,rdr
-										il.Emit(OpCodes.Ldc_I4, i);										// *,rdr,i
-										il.Emit(OpCodes.Callvirt, valuegetter);							// *,value
-
-										// Convert to Nullable
-										if (Nullable.GetUnderlyingType(dstType) != null)
-										{
-											il.Emit(OpCodes.Newobj, dstType.GetConstructor(new Type[] { Nullable.GetUnderlyingType(dstType) }));
-										}
-
-										il.Emit(OpCodes.Callvirt, pc.PropertyInfo.GetSetMethod(true));		// poco
-										Handled = true;
-									}
-								}
-
-								// Not so fast
-								if (!Handled)
-								{
-									// Setup stack for call to converter
-									AddConverterToStack(il, converter);
-
-									// "value = rdr.GetValue(i)"
 									il.Emit(OpCodes.Ldarg_0);										// *,rdr
 									il.Emit(OpCodes.Ldc_I4, i);										// *,rdr,i
-									il.Emit(OpCodes.Callvirt, fnGetValue);							// *,value
+									il.Emit(OpCodes.Callvirt, valuegetter);							// *,value
 
-									// Call the converter
-									if (converter != null)
-										il.Emit(OpCodes.Callvirt, fnInvoke);
+									// Convert to Nullable
+									if (Nullable.GetUnderlyingType(dstType) != null)
+									{
+										il.Emit(OpCodes.Newobj, dstType.GetConstructor(new Type[] { Nullable.GetUnderlyingType(dstType) }));
+									}
 
-									// Assign it
-									il.Emit(OpCodes.Unbox_Any, pc.PropertyInfo.PropertyType);		// poco,poco,value
 									il.Emit(OpCodes.Callvirt, pc.PropertyInfo.GetSetMethod(true));		// poco
+									Handled = true;
 								}
-
-								il.MarkLabel(lblNext);
 							}
 
-							var fnOnLoaded = RecurseInheritedTypes<MethodInfo>(type, (x) => x.GetMethod("OnLoaded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[0], null));
-							if (fnOnLoaded != null)
+							// Not so fast
+							if (!Handled)
 							{
-								il.Emit(OpCodes.Dup);
-								il.Emit(OpCodes.Callvirt, fnOnLoaded);
+								// Setup stack for call to converter
+								AddConverterToStack(il, converter);
+
+								// "value = rdr.GetValue(i)"
+								il.Emit(OpCodes.Ldarg_0);										// *,rdr
+								il.Emit(OpCodes.Ldc_I4, i);										// *,rdr,i
+								il.Emit(OpCodes.Callvirt, fnGetValue);							// *,value
+
+								// Call the converter
+								if (converter != null)
+									il.Emit(OpCodes.Callvirt, fnInvoke);
+
+								// Assign it
+								il.Emit(OpCodes.Unbox_Any, pc.PropertyInfo.PropertyType);		// poco,poco,value
+								il.Emit(OpCodes.Callvirt, pc.PropertyInfo.GetSetMethod(true));		// poco
 							}
+
+							il.MarkLabel(lblNext);
 						}
+
+						var fnOnLoaded = RecurseInheritedTypes<MethodInfo>(type, (x) => x.GetMethod("OnLoaded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[0], null));
+						if (fnOnLoaded != null)
+						{
+							il.Emit(OpCodes.Dup);
+							il.Emit(OpCodes.Callvirt, fnOnLoaded);
+						}
+					}
 
 					il.Emit(OpCodes.Ret);
 
