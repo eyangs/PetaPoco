@@ -36,6 +36,12 @@ namespace PetaPoco
 	public class IgnoreAttribute : Attribute
 	{
 	}
+    // causes a property to be ignored in insert clause, but can be select.
+    // use for database column has a default value
+    [AttributeUsage(AttributeTargets.Property)]
+    public class IgnoreInsertAttribute : Attribute
+    {
+    }
 
 	// For explicit pocos, marks property as a column and optionally supplies column name
 	[AttributeUsage(AttributeTargets.Property)]
@@ -1209,6 +1215,10 @@ namespace PetaPoco
 							if (i.Value.ResultColumn)
 								continue;
 
+                            // Don't insert ignore columns
+                            if (i.Value.IsIgnoreInsert)
+							    continue;
+
 							// Don't insert the primary key (except under oracle where we need bring in the next sequence value)
 							if (autoIncrement && primaryKeyName != null && string.Compare(i.Key, primaryKeyName, true)==0)
 							{
@@ -1674,6 +1684,7 @@ namespace PetaPoco
 			public string ColumnName;
 			public PropertyInfo PropertyInfo;
 			public bool ResultColumn;
+            public bool IsIgnoreInsert;
 			public virtual void SetValue(object target, object val) { PropertyInfo.SetValue(target, val, null); }
 			public virtual object GetValue(object target) { return PropertyInfo.GetValue(target, null); }
 			public virtual object ChangeType(object val) { return Convert.ChangeType(val, PropertyInfo.PropertyType); }
@@ -1799,6 +1810,9 @@ namespace PetaPoco
 
 					var pc = new PocoColumn();
 					pc.PropertyInfo = pi;
+
+                    if (pi.GetCustomAttributes(typeof(IgnoreInsertAttribute), true).Length != 0)
+                        pc.IsIgnoreInsert = true;
 
 					// Work out the DB column name
 					if (ColAttrs.Length > 0)
